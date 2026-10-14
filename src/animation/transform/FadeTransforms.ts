@@ -3,11 +3,183 @@
  * Includes FadeTransform, FadeTransformPieces, and TransformFromCopy.
  */
 
+import * as THREE from 'three';
 import { VMobject } from '../../core/VMobject';
 import { Animation, AnimationOptions } from '../Animation';
 import { Transform } from './Transform';
 import { lerpPoint } from '../../utils/math';
-import { alignVmobjectPair, needsLeafPairing } from './TransformPairing';
+import { worldToParentLocalPosition } from '../../core/MobjectTraversal';
+import {
+  alignVmobjectPair,
+  canMorphByPoints,
+  needsLeafPairing,
+  pairLeafSnapshotsByIndex,
+  type LeafPairByIndex,
+} from './TransformPairing';
+
+// ============================================================================
+// Leaf-pairing machinery for the group paths
+// ============================================================================
+//
+// FadeTransform / FadeTransformPieces on a group (a VGroup, a multi-part
+// MathTex, ...) cannot morph the root's flat point arrays: the old paths
+// aligned the LIVE tree in place with alignPoints(), which resampled the
+// live children permanently (on the VS2 span scene the glyph leaf count
+// went 15 -> 32 at begin() and stayed there), and finish() installed
+// only the aligned (resampled) points plus the ROOT color, so a colored
+// multi-part target ended in the source's per-part colors on resampled
+// geometry. The group paths below pair the two leaf families with
+// pairLeafSnapshotsByIndex — the same primitive PointMorphStrategy's
+// VGroup path uses — and layer the fade curve on top: points and
+// positions interpolate per leaf, opacity follows the fade V-curve per
+// leaf, the remaining style channels switch from the source leaf's to
+// the target leaf's at the midpoint (where the leaf is fully faded out,
+// so the switch is never visible), and finish() installs each target
+// leaf's own points and style, exactly like PointMorphStrategy.finish().
+
+interface FadeLeafStyle {
+  opacity: number;
+  fillOpacity: number;
+  strokeWidth: number;
+  color: string;
+  fillColor: string;
+}
+
+interface FadeLeafState {
+  child: VMobject;
+  startPoints: number[][];
+  targetPoints: number[][];
+  // Both positions are absolute coordinates in the source root's
+  // parent-local frame, computed via
+  // worldToParentLocalPosition(*.worldPosition, src.parentWorldMatrix)
+  // (the target position deliberately uses the SOURCE snapshot's parent
+  // matrix so both live in the same frame — PointMorphStrategy's
+  // convention).
+  startPosition: THREE.Vector3;
+  targetPosition: THREE.Vector3;
+  finalTargetPoints: number[][];
+  finalTargetSubpathLengths?: number[];
+  startStyle: FadeLeafStyle;
+  targetStyle: FadeLeafStyle;
+}
+
+function captureFadeStyle(m: VMobject): FadeLeafStyle {
+  return {
+    opacity: m.opacity,
+    fillOpacity: m.fillOpacity,
+    strokeWidth: m.strokeWidth,
+    color: m.color,
+    fillColor: m.fillColor || m.color,
+  };
+}
+
+function captureFadedStyle(m: VMobject): FadeLeafStyle {
+  return {
+    opacity: 0,
+    fillOpacity: 0,
+    strokeWidth: m.strokeWidth,
+    color: m.color,
+    fillColor: m.fillColor || m.color,
+  };
+}
+
+/**
+ * Build one leaf's morph state, mirroring PointMorphStrategy._build:
+ * a placeholder source starts as an invisible copy of the target leaf,
+ * a padded duplicate joins the scene graph as a real sibling, and a
+ * morphable pair is aligned on copies (the live leaf receives the
+ * aligned start points, never a resampling of its own tree in place).
+ */
+function buildFadeLeafState(root: VMobject, pair: LeafPairByIndex): FadeLeafState {
+  const { source: src, target: tgt, sourceIsPlaceholder, targetIsPlaceholder, sourceIsNew } = pair;
+  const sc = src.leaf;
+  const tc = tgt.leaf;
+  let child: VMobject = sc;
+  if (sourceIsPlaceholder) {
+    // Blank filler (only when the source family had zero leaves at
+    // all): start as an invisible copy of the target, fading in in
+    // place.
+    child = tc.copy();
+    child.opacity = 0;
+    child.fillOpacity = 0;
+    root.add(child);
+  } else if (sourceIsNew) {
+    // A real duplicate of an existing sibling (Manim CE's
+    // add_n_more_submobjects): already a full, visible VMobject with
+    // its own geometry/style — it just needs to join the scene graph.
+    root.add(child);
+  }
+  const canMorph = canMorphByPoints(sc, tc) && !sourceIsPlaceholder && !targetIsPlaceholder;
+  const aligned = canMorph ? alignVmobjectPair(sc, tc) : undefined;
+  const startPoints = aligned?.startPoints ?? child.getLocalPoints();
+  const targetPoints = aligned?.targetPoints ?? child.getLocalPoints();
+  const finalTargetPoints = aligned?.finalTargetPoints ?? child.getLocalPoints();
+  const finalTargetSubpathLengths = aligned?.finalTargetSubpathLengths;
+  if (aligned) {
+    child.setPoints(aligned.startPoints);
+    child.setTransformSubpathLengths(aligned.alignedSubpathLengths);
+  } else {
+    child.setTransformSubpathLengths(undefined);
+  }
+  const startStyle = sourceIsPlaceholder ? captureFadedStyle(tc) : captureFadeStyle(child);
+  const targetStyle = targetIsPlaceholder ? captureFadedStyle(sc) : captureFadeStyle(tc);
+  return {
+    child,
+    startPoints,
+    targetPoints,
+    finalTargetPoints,
+    finalTargetSubpathLengths,
+    startPosition: worldToParentLocalPosition(src.worldPosition, src.parentWorldMatrix),
+    targetPosition: worldToParentLocalPosition(tgt.worldPosition, src.parentWorldMatrix),
+    startStyle,
+    targetStyle,
+  };
+}
+
+function interpolateFadeLeaf(leaf: FadeLeafState, alpha: number): void {
+  const child = leaf.child;
+  const interpolatedPoints: number[][] = [];
+  for (let i = 0; i < leaf.startPoints.length; i++) {
+    interpolatedPoints.push(lerpPoint(leaf.startPoints[i], leaf.targetPoints[i], alpha));
+  }
+  child.setPoints(interpolatedPoints);
+  child.position.lerpVectors(leaf.startPosition, leaf.targetPosition, alpha);
+  // The fade curve owns opacity. The remaining style channels switch
+  // from the source leaf's to the target leaf's at alpha = 0.5, where
+  // the leaf is fully faded out, so the switch is never visible.
+  const style = alpha < 0.5 ? leaf.startStyle : leaf.targetStyle;
+  child.fillOpacity = style.fillOpacity;
+  child.strokeWidth = style.strokeWidth;
+  child.color = style.color;
+  child.fillColor = style.fillColor;
+  child.opacity =
+    alpha < 0.5
+      ? leaf.startStyle.opacity * (1 - 2 * alpha)
+      : leaf.targetStyle.opacity * (2 * alpha - 1);
+  child._markDirty();
+}
+
+const ZERO_POS_OFFSET = new THREE.Vector3();
+
+/**
+ * Install a target leaf's own final state (points, topology, style,
+ * position). `posOffset` re-expresses the target position from the
+ * morph root's parent frame into the root's local frame when the root
+ * itself moves to the target root's position (FadeTransform); it is
+ * zero when the leaf's parent never moves (FadeTransformPieces).
+ */
+function finishFadeLeaf(leaf: FadeLeafState, posOffset: THREE.Vector3): void {
+  const child = leaf.child;
+  child.setPoints(leaf.finalTargetPoints);
+  child.position.copy(leaf.targetPosition).sub(posOffset);
+  child.opacity = leaf.targetStyle.opacity;
+  child.fillOpacity = leaf.targetStyle.fillOpacity;
+  child.strokeWidth = leaf.targetStyle.strokeWidth;
+  child.color = leaf.targetStyle.color;
+  child.fillColor = leaf.targetStyle.fillColor;
+  child.setTransformSubpathLengths(leaf.finalTargetSubpathLengths);
+  child._markDirty();
+}
 
 // ============================================================================
 // FadeTransform
@@ -44,6 +216,13 @@ export class FadeTransform extends Animation<VMobject> {
   /** Transform-time subpath lengths override for compound paths */
   private _alignedSubpathLengths?: number[];
 
+  /** Per-leaf morph states for the group path (null = flat path) */
+  private _groupLeafStates: FadeLeafState[] | null = null;
+
+  /** Group root positions (parent-local) captured on the group path */
+  private _groupStartPosition = new THREE.Vector3();
+  private _groupTargetPosition = new THREE.Vector3();
+
   constructor(mobject: VMobject, target: VMobject, options: FadeTransformOptions = {}) {
     super(mobject, options);
     this.target = target;
@@ -54,46 +233,47 @@ export class FadeTransform extends Animation<VMobject> {
     super.begin();
 
     const vmobject = this.mobject;
+    this._groupLeafStates = null;
 
     if (needsLeafPairing(vmobject) && needsLeafPairing(this.target)) {
-      // Container (VGroup, MathTex, ...): the flat arrays produced from
-      // aligned copies cannot be setPoints()'d onto the live mobject —
-      // a VGroup partitions a flat array across its children by their
-      // CURRENT point counts, which are the unaligned ones. Align the
-      // live mobject against a copy of the target instead (what Manim
-      // CE's Transform.begin does with align_points): alignPoints pads
-      // and resamples the live children, so the interpolated arrays
-      // partition exactly at every interpolate() call.
-      const targetCopy = this.target.copy();
-      vmobject.alignPoints(targetCopy);
-      this._startPoints = vmobject.getLocalPoints();
-      this._targetPoints = targetCopy.getLocalPoints();
+      // Container (VGroup, MathTex, ...): pair the two leaf families
+      // and morph leaf-by-leaf, like PointMorphStrategy's VGroup path.
+      // The old path aligned the live tree in place against a copy of
+      // the target (what Manim CE's Transform.begin does with
+      // align_points): alignPoints padded and resampled the live
+      // children permanently, and finish() could then only install
+      // the aligned points + the root color — per-part target colors
+      // and the target's own per-leaf geometry were lost.
+      vmobject.normalizeTransform();
+      const normalizedTarget = this.target.copy();
+      normalizedTarget.normalizeTransform();
+      this._groupStartPosition.copy(vmobject.position);
+      this._groupTargetPosition.copy(normalizedTarget.position);
+      this._groupLeafStates = pairLeafSnapshotsByIndex(vmobject, normalizedTarget).map((pair) =>
+        buildFadeLeafState(vmobject, pair),
+      );
       this._alignedSubpathLengths = undefined;
-      if (this._startPoints.length !== this._targetPoints.length) {
-        // A subgroup empty on one side has nothing to pair, so
-        // alignPoints left the totals diverged. Fail here, at setup,
-        // with the descriptive shape alignVmobjectPair uses — never
-        // mid-animation, where interpolate() would index past the
-        // shorter array and throw a raw TypeError.
-        throw new Error(
-          `FadeTransform: alignPoints produced mismatched point counts (${this._startPoints.length} vs ${this._targetPoints.length})`,
-        );
-      }
     } else {
       const aligned = alignVmobjectPair(vmobject, this.target);
       this._startPoints = aligned.startPoints;
       this._targetPoints = aligned.targetPoints;
       this._alignedSubpathLengths = aligned.alignedSubpathLengths;
+      vmobject.setPoints(this._startPoints);
+      vmobject.setTransformSubpathLengths(this._alignedSubpathLengths);
     }
     this._startOpacity = vmobject.opacity;
     this._targetOpacity = this.target.opacity;
-
-    vmobject.setPoints(this._startPoints);
-    vmobject.setTransformSubpathLengths(this._alignedSubpathLengths);
   }
 
   interpolate(alpha: number): void {
     const vmobject = this.mobject;
+
+    if (this._groupLeafStates) {
+      for (const leaf of this._groupLeafStates) {
+        interpolateFadeLeaf(leaf, alpha);
+      }
+      return;
+    }
 
     // Interpolate points
     const interpolatedPoints: number[][] = [];
@@ -114,6 +294,28 @@ export class FadeTransform extends Animation<VMobject> {
 
   override finish(): void {
     const vmobject = this.mobject;
+
+    if (this._groupLeafStates) {
+      // Install each target leaf's own final state, then move the
+      // group root to the target root's position (leaf target
+      // positions are re-expressed into the root's local frame by
+      // subtracting the root's own displacement — the same accounting
+      // PointMorphStrategy.finish() does for its VGroup path).
+      const posOffset = new THREE.Vector3().subVectors(
+        this._groupTargetPosition,
+        this._groupStartPosition,
+      );
+      for (const leaf of this._groupLeafStates) {
+        finishFadeLeaf(leaf, posOffset);
+      }
+      vmobject.position.copy(this._groupTargetPosition);
+      vmobject.opacity = this._targetOpacity;
+      vmobject.color = this.target.color;
+      vmobject._markDirty();
+      super.finish();
+      return;
+    }
+
     vmobject.setPoints(this._targetPoints);
     vmobject.setTransformSubpathLengths(undefined);
     vmobject.opacity = this._targetOpacity;
@@ -154,9 +356,16 @@ export class FadeTransformPieces extends Animation<VMobject> {
   private _pieceStates: Array<{
     startPoints: number[][];
     targetPoints: number[][];
+    /** The target piece's own (unaligned) points, installed by finish() */
+    finalTargetPoints: number[][];
+    finalTargetSubpathLengths?: number[];
     startOpacity: number;
     targetOpacity: number;
+    /** The target piece's own style, installed by finish() (flat pieces) */
+    targetStyle?: FadeLeafStyle;
     alignedSubpathLengths?: number[];
+    /** Per-leaf morph states for a container piece (see buildFadeLeafState) */
+    leaves?: FadeLeafState[];
   }> = [];
 
   constructor(mobject: VMobject, target: VMobject, options: FadeTransformPiecesOptions = {}) {
@@ -207,29 +416,30 @@ export class FadeTransformPieces extends Animation<VMobject> {
         const srcChild = srcList[i];
         const tgtChild = tgtList[i];
 
-        if (needsLeafPairing(srcChild) && needsLeafPairing(tgtChild)) {
-          // Container child (e.g. a multi-part MathTex part group): the
-          // arrays are applied to the LIVE child via setPoints, which
-          // partitions across the child's CURRENT counts — but
-          // alignVmobjectPair aligns only its internal copies, leaving
-          // the live counts untouched and the partition broken. Align
-          // the live child against a copy of the target child instead,
-          // exactly as FadeTransform.begin does for its root.
+        if (needsLeafPairing(srcChild) || needsLeafPairing(tgtChild)) {
+          // Container piece (e.g. one part of a multi-part MathTex):
+          // morph it leaf-by-leaf, like FadeTransform's group path.
+          // The old code aligned the live child in place against a
+          // copy of the target child, resampling it permanently, and
+          // finish() installed only the aligned points — the target
+          // piece's per-leaf colors and own geometry were lost. (The
+          // old dispatch also required BOTH sides to be containers; a
+          // container paired with a plain leaf fell through to the
+          // flat arrays, whose partition across the live child's
+          // current counts is the same defect. Leaf pairing handles
+          // either side delegating.)
           const tgtCopy = tgtChild.copy();
-          srcChild.alignPoints(tgtCopy);
-          const startPoints = srcChild.getLocalPoints();
-          const targetPoints = tgtCopy.getLocalPoints();
-          if (startPoints.length !== targetPoints.length) {
-            throw new Error(
-              `FadeTransformPieces: alignPoints produced mismatched point counts for piece ${i} (${startPoints.length} vs ${targetPoints.length})`,
-            );
-          }
+          const leaves = pairLeafSnapshotsByIndex(srcChild, tgtCopy).map((pair) =>
+            buildFadeLeafState(srcChild, pair),
+          );
           this._pieceStates.push({
-            startPoints,
-            targetPoints,
+            startPoints: [],
+            targetPoints: [],
+            finalTargetPoints: [],
             startOpacity: srcChild.opacity,
             targetOpacity: tgtChild.opacity,
             alignedSubpathLengths: undefined,
+            leaves,
           });
           continue;
         }
@@ -238,8 +448,11 @@ export class FadeTransformPieces extends Animation<VMobject> {
         this._pieceStates.push({
           startPoints: aligned.startPoints,
           targetPoints: aligned.targetPoints,
+          finalTargetPoints: aligned.finalTargetPoints,
+          finalTargetSubpathLengths: aligned.finalTargetSubpathLengths,
           startOpacity: srcChild.opacity,
           targetOpacity: tgtChild.opacity,
+          targetStyle: captureFadeStyle(tgtChild),
           alignedSubpathLengths: aligned.alignedSubpathLengths,
         });
       }
@@ -249,8 +462,11 @@ export class FadeTransformPieces extends Animation<VMobject> {
       this._pieceStates.push({
         startPoints: aligned.startPoints,
         targetPoints: aligned.targetPoints,
+        finalTargetPoints: aligned.finalTargetPoints,
+        finalTargetSubpathLengths: aligned.finalTargetSubpathLengths,
         startOpacity: source.opacity,
         targetOpacity: this.target.opacity,
+        targetStyle: captureFadeStyle(this.target),
         alignedSubpathLengths: aligned.alignedSubpathLengths,
       });
     }
@@ -265,6 +481,13 @@ export class FadeTransformPieces extends Animation<VMobject> {
         const child = sourceChildren[i];
         const state = this._pieceStates[i];
 
+        if (state.leaves) {
+          for (const leaf of state.leaves) {
+            interpolateFadeLeaf(leaf, alpha);
+          }
+          continue;
+        }
+
         const points: number[][] = [];
         for (let j = 0; j < state.startPoints.length; j++) {
           points.push(lerpPoint(state.startPoints[j], state.targetPoints[j], alpha));
@@ -277,6 +500,16 @@ export class FadeTransformPieces extends Animation<VMobject> {
           child.opacity = state.startOpacity * (1 - 2 * alpha);
         } else {
           child.opacity = state.targetOpacity * (2 * alpha - 1);
+          // The piece is fading back in as the target: show the target
+          // piece's style from the (invisible) midpoint on, so the end
+          // of the fade does not pop from the source's colors at
+          // finish().
+          if (state.targetStyle) {
+            child.fillOpacity = state.targetStyle.fillOpacity;
+            child.strokeWidth = state.targetStyle.strokeWidth;
+            child.color = state.targetStyle.color;
+            child.fillColor = state.targetStyle.fillColor;
+          }
         }
       }
     } else if (this._pieceStates.length > 0) {
@@ -305,9 +538,31 @@ export class FadeTransformPieces extends Animation<VMobject> {
       for (let i = 0; i < sourceChildren.length; i++) {
         const child = sourceChildren[i];
         const state = this._pieceStates[i];
-        child.setPoints(state.targetPoints);
-        child.setTransformSubpathLengths(undefined);
+
+        if (state.leaves) {
+          // The piece child itself never moves, so leaf target
+          // positions install as captured (no root offset).
+          for (const leaf of state.leaves) {
+            finishFadeLeaf(leaf, ZERO_POS_OFFSET);
+          }
+          child.opacity = state.targetOpacity;
+          continue;
+        }
+
+        // Install the target piece's OWN final state — its unaligned
+        // points, topology, and style. The old finish() installed the
+        // aligned (resampled) points and no style at all, so a piece
+        // ended in the source piece's colors on resampled geometry.
+        child.setPoints(state.finalTargetPoints);
+        child.setTransformSubpathLengths(state.finalTargetSubpathLengths);
         child.opacity = state.targetOpacity;
+        if (state.targetStyle) {
+          child.fillOpacity = state.targetStyle.fillOpacity;
+          child.strokeWidth = state.targetStyle.strokeWidth;
+          child.color = state.targetStyle.color;
+          child.fillColor = state.targetStyle.fillColor;
+        }
+        child._markDirty();
       }
     } else if (this._pieceStates.length > 0) {
       const state = this._pieceStates[0];
