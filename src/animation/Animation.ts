@@ -276,7 +276,22 @@ export abstract class Animation<M extends Mobject = Mobject> {
     }
 
     const elapsed = currentTime - this._startTime;
-    const rawAlpha = this.duration > 0 ? Math.min(1, Math.max(0, elapsed / this.duration)) : 1;
+    // Segment start/end times are accumulated floats: a 1.0s segment
+    // followed by a 0.3s wait puts the next segment's start at
+    // 1.2999999999999998, so at that segment's end `elapsed` lands a
+    // hair below `duration` (0.9999999999999998 < 1) and rawAlpha
+    // stalls at 1 - epsilon -- finish() never runs. finish() is where
+    // several animations install their exact end state (Transform
+    // above all: its interpolate() only ever produces the aligned /
+    // resampled morph arrays), so the terminal frame -- in playback
+    // and on seek -- was left as interpolate(1 - epsilon) instead of
+    // the target's own state. Snap the final sliver of elapsed time
+    // to the full duration; 1e-9s is far above the float error
+    // (~1e-13 at these magnitudes) and far below any frame time.
+    const snappedElapsed =
+      this.duration > 0 && elapsed > this.duration - 1e-9 ? this.duration : elapsed;
+    const rawAlpha =
+      this.duration > 0 ? Math.min(1, Math.max(0, snappedElapsed / this.duration)) : 1;
     const alpha = this.rateFunc(rawAlpha);
     this.interpolate(alpha);
 
