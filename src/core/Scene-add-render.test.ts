@@ -7,6 +7,8 @@ import { Square } from '../mobjects/geometry/Rectangle';
 import { DashedLine } from '../mobjects/geometry/DashedLine';
 import { Create } from '../animation/creation/Create';
 import { FadeIn } from '../animation/fading/FadeIn';
+import { FadeOut } from '../animation/fading/FadeOut';
+import { ChangeSpeed } from '../animation/speed/index';
 
 /**
  * Regression tests for issue #317:
@@ -238,6 +240,36 @@ describe('Scene.add() sets per-instance scene context before the first Three.js 
     const material = firstLine2(circle).material as unknown as { linewidth: number };
     expect(material.linewidth).not.toBeCloseTo(staleLinewidth(6), 3);
 
+    scene.dispose();
+  });
+});
+
+describe('live Scene.play with ChangeSpeed-wrapped animations (C3)', () => {
+  // C3 (review repair) unified the animation-tree walk into
+  // flattenAnimations.ts (which unwraps ChangeSpeed) and Scene's live
+  // _collectAllAnimations now uses it. Deliberate, Manim-consistent
+  // side effect on LIVE playback: the old Scene-local walk saw only
+  // the ChangeSpeed wrapper (whose mobject is a dummy), so the wrapped
+  // animation's mobject never joined the scene and a wrapped remover
+  // was never honored. These tests pin the new behavior.
+  it('live ChangeSpeed(FadeIn) adds the wrapped mobject to the scene', async () => {
+    const scene = Scene.createHeadless();
+    const square = new Square();
+
+    await scene.play(new ChangeSpeed(new FadeIn(square, { duration: 0.05 }), () => 1));
+
+    expect(scene.mobjects.has(square)).toBe(true);
+    scene.dispose();
+  });
+
+  it('live ChangeSpeed(FadeOut) honors the wrapped remover', async () => {
+    const scene = Scene.createHeadless();
+    const square = new Square();
+    scene.add(square);
+
+    await scene.play(new ChangeSpeed(new FadeOut(square, { duration: 0.05 }), () => 1));
+
+    expect(scene.mobjects.has(square)).toBe(false);
     scene.dispose();
   });
 });
