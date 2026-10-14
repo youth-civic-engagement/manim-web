@@ -13,8 +13,8 @@
  */
 
 import { Animation } from './Animation';
-import { AnimationGroup } from './AnimationGroup';
 import { Timeline } from './Timeline';
+import { flattenAnimations } from './flattenAnimations';
 import { logger } from '../utils/logger';
 
 export interface Segment {
@@ -200,11 +200,18 @@ export class MasterTimeline extends Timeline {
     // Track which segment first introduces each mobject and save its
     // original opacity before any seek() hides it. Nested animations
     // (AnimationGroup, LaggedStart, Succession) introduce their own
-    // mobjects (#861).
-    for (const anim of flattenAnimations(animations)) {
-      if (!this._isAlreadyShown(anim.mobject)) {
-        this._mobjectFirstSegment.set(anim.mobject, segmentIndex);
-        this._savedMobjectOpacities.set(anim.mobject, anim.mobject.opacity);
+    // mobjects (#861). The walk is the shared flattenAnimations helper
+    // (flattenAnimations.ts): the same walk Scene uses, extended to see
+    // through ChangeSpeed wrappers — a mobject whose first animation
+    // is nested in a LaggedStart or a ChangeSpeed
+    // is introduced by THIS segment, not by a later segment where it
+    // appears as a top-level animation (e.g. as a FadeOut target).
+    for (const anim of animations) {
+      for (const flat of flattenAnimations(anim)) {
+        if (!this._isAlreadyShown(flat.mobject)) {
+          this._mobjectFirstSegment.set(flat.mobject, segmentIndex);
+          this._savedMobjectOpacities.set(flat.mobject, flat.mobject.opacity);
+        }
       }
     }
 
@@ -463,18 +470,6 @@ export class MasterTimeline extends Timeline {
   get segmentCount(): number {
     return this._segments.length;
   }
-}
-
-/** Depth-first list of `animations` and every animation nested in a group. */
-function flattenAnimations(animations: readonly Animation[]): Animation[] {
-  const result: Animation[] = [];
-  for (const anim of animations) {
-    result.push(anim);
-    if (anim instanceof AnimationGroup) {
-      result.push(...flattenAnimations(anim.animations));
-    }
-  }
-  return result;
 }
 
 /**
