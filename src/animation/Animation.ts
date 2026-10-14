@@ -112,6 +112,16 @@ function restoreSubtreeFromSnapshot(
       if (pts.length > 0) {
         live.setPoints(pts);
       }
+      // The points' subpath topology is part of the point state. A
+      // morph strategy's finish() leaves the TARGET's partition in the
+      // transform override on the source's leaves, where it describes
+      // the target's points -- not the ones just restored. Put back the
+      // override the node carried at begin() (for an authored mobject,
+      // none) alongside its points, or a glyph-changing morph's parked
+      // state renders the source's own points under the target's
+      // partition: where the sums disagree the effective lengths come
+      // out undefined and the glyph fills as a single ring.
+      live.setTransformSubpathLengths(saved.getTransformSubpathLengths());
       return;
     }
   }
