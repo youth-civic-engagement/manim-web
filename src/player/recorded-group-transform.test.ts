@@ -254,13 +254,35 @@ describe('group alignment (alignPoints / alignVmobjectPair)', () => {
     expect(withChild.familyMembersWithPoints()).toHaveLength(familyBefore);
   });
 
-  // B3 (review repair): when one side has an empty subgroup, alignment
-  // cannot equalize the totals; FadeTransform must fail at begin() with
-  // a descriptive error (as alignVmobjectPair does), never mid-animation
-  // with a raw TypeError from interpolate().
-  it('FadeTransform fails at begin() when a subgroup is empty on one side (B3)', () => {
+  // B3 (review repair; contract updated by Block H): the old group
+  // path aligned level-by-level with alignPoints, which could not
+  // equalize totals across an empty subgroup and had to fail at
+  // begin() with a descriptive error rather than mid-animation. The
+  // leaf-pairing group path pairs the two leaf FAMILIES (Manim CE
+  // semantics, the same as Transform), so an empty subgroup is no
+  // longer special: the morph runs and every end leaf lands on the
+  // target's own render. A target with no leaves at all still fails
+  // at begin() with a descriptive error, never mid-animation.
+  it('FadeTransform pairs leaf families when a subgroup is empty on one side (B3)', () => {
     const source = new VGroup(new VGroup(vmWithPoints(6)), vmWithPoints(6));
-    const target = new VGroup(new VGroup(), vmWithPoints(6));
+    const targetLeaf = vmWithPoints(6);
+    const target = new VGroup(new VGroup(), targetLeaf);
+
+    const anim = new FadeTransform(source, target);
+    anim.begin();
+    anim.interpolate(1);
+    anim.finish();
+
+    const endLeaves = collectLeafVMobjectSnapshots(source).map((s) => s.leaf);
+    expect(endLeaves.length).toBe(2);
+    for (const leaf of endLeaves) {
+      expect(leaf.getLocalPoints()).toEqual(targetLeaf.getLocalPoints());
+    }
+  });
+
+  it('FadeTransform fails at begin() when the target has no leaves at all (B3)', () => {
+    const source = new VGroup(vmWithPoints(6));
+    const target = new VGroup();
 
     const anim = new FadeTransform(source, target);
     expect(() => anim.begin()).toThrowError(/mismatched point counts/);
