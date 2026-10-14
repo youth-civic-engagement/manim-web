@@ -1284,14 +1284,20 @@ describe('RecordingScene pass-through methods', () => {
       await scene.play(mockAnimation as never);
     });
 
-    expect(mockAnimation.begin).toHaveBeenCalled();
+    // Recording must not begin animations (Block G round 4):
+    // begin() captures the reset() snapshot and a morph's begin()
+    // mutates its mobject, so beginning at record time — with the
+    // earlier segments never run — poisoned every later animation's
+    // snapshot on a shared mobject. Animations begin at their first
+    // playback/seek update instead.
+    expect(mockAnimation.begin).not.toHaveBeenCalled();
     expect(addSpy).toHaveBeenCalledWith(mockMobject);
     expect(player.timeline.segmentCount).toBe(1);
     expect(player.timeline.getDuration()).toBeCloseTo(1.0);
     addSpy.mockRestore();
   });
 
-  it('play syncs dirty mobjects before begin', async () => {
+  it('play syncs dirty mobjects when recording', async () => {
     const { mockMobject, mockAnimation } = createMockAnimation({ dirty: true, duration: 0.5 });
     const addSpy = vi.spyOn(player.scene, 'add').mockReturnThis();
 
