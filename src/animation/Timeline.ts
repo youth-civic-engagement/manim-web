@@ -126,17 +126,37 @@ export class Timeline {
     this._currentTime = Math.max(0, Math.min(time, this._duration));
 
     if (time < prevTime) {
-      for (const scheduled of this._animations) {
-        if (scheduled.startTime > this._currentTime) {
-          scheduled.animation.reset();
-          this._startedAnimations.delete(scheduled.animation);
-        }
-      }
+      this._resetAnimationsAfter(this._currentTime);
     }
 
     this._updateAnimationsAtTime(this._currentTime);
 
     return this;
+  }
+
+  /**
+   * Undo every animation scheduled after `time`, latest first.
+   *
+   * The order is load-bearing: reset() installs the animation's OWN
+   * begin state, so a cascade that runs in schedule order leaves the
+   * LAST animation's begin state standing — for a chain of morphs on
+   * one mobject, a backward seek to before the chain reconstructed
+   * the intermediate state instead of the source. Unwinding LIFO
+   * (like any undo stack) makes each reset land on a state the next
+   * (earlier) reset then fully overwrites, ending at the state the
+   * earliest animation started from.
+   *
+   * Protected so MasterTimeline — whose seek() performs the complete
+   * undo itself — can take over this step entirely.
+   */
+  protected _resetAnimationsAfter(time: number): void {
+    for (let i = this._animations.length - 1; i >= 0; i--) {
+      const scheduled = this._animations[i];
+      if (scheduled.startTime > time) {
+        scheduled.animation.reset();
+        this._startedAnimations.delete(scheduled.animation);
+      }
+    }
   }
 
   /**
@@ -202,8 +222,10 @@ export class Timeline {
     this._isPlaying = false;
     this._startedAnimations.clear();
 
-    for (const scheduled of this._animations) {
-      scheduled.animation.reset();
+    // Full undo: unwind latest-first, like _resetAnimationsAfter —
+    // in schedule order the last animation's begin state would win.
+    for (let i = this._animations.length - 1; i >= 0; i--) {
+      this._animations[i].animation.reset();
     }
 
     return this;

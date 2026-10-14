@@ -24,10 +24,10 @@ export class RecordingScene {
   async play(...animations: Animation[]): Promise<void> {
     if (animations.length === 0) return;
 
-    // Collect all nested animations for scene.add + begin()
+    // Collect all nested animations for scene.add
     const allAnimations = this._collectAll(animations);
 
-    // Sync geometry so begin() can detect children
+    // Sync geometry so the scene graph sees current children
     for (const anim of allAnimations) {
       if (anim.mobject._dirty) {
         anim.mobject._syncToThree();
@@ -35,16 +35,24 @@ export class RecordingScene {
       }
     }
 
-    // Record segment BEFORE begin() so addSegment captures the correct
-    // pre-animation opacity. begin() may modify mobject opacity (e.g.
-    // Create's opacity fallback sets it to 0), which would corrupt the
-    // saved value used for visibility restoration during seek/playback.
     this._masterTimeline.addSegment(animations);
 
-    // Initialize top-level animations
-    for (const anim of animations) {
-      anim.begin();
-    }
+    // Deliberately NO anim.begin() here: recording must not run any
+    // part of an animation (this class's contract — see the header).
+    // begin() is not a pure setup hook: Animation.begin() captures the
+    // snapshot reset() will later restore, and a morph's begin()
+    // then MUTATES its mobject into the aligned start state. Calling
+    // it at record time — with the earlier segments never run — made
+    // every later animation on the same mobject capture its begin
+    // snapshot against a predecessor's half-begun tree (a Transform
+    // chain's second snapshot held the first morph's resampled /
+    // subpath-reordered aligned points, not its end state), and
+    // seek() restored that state verbatim at the first morph's
+    // parked time. Animations instead begin at their first playback
+    // or seek update(), where the preceding segments have actually
+    // run to completion and the captured state is the true one.
+    // addSegment above already recorded the pre-animation opacity
+    // for visibility restoration, from the untouched mobject.
 
     // Add to real scene (so they're visible when we seek)
     for (const anim of allAnimations) {
