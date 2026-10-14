@@ -89,10 +89,19 @@ export class MasterTimeline extends Timeline {
    * (e.g. a FadeOut'd mobject stays invisible when scrubbing back).
    */
   override seek(time: number): this {
-    // Reset every segment's animations to pristine state
-    for (const seg of this._segments) {
-      for (const anim of seg.animations) {
-        anim.reset();
+    // Reset every segment's animations to pristine state. The unwind
+    // runs in REVERSE segment order: reset() installs an animation's
+    // own begin state, so in schedule order the LAST animation on a
+    // shared mobject decided the reconstructed state wherever no
+    // re-application follows (a two-Transform chain seeked to before
+    // its first morph reconstructed the second morph's begin state,
+    // never the source). LIFO, each reset is overwritten by the
+    // earlier animations' resets and the cascade ends at the
+    // timeline's start state; re-application then replays forward.
+    for (let s = this._segments.length - 1; s >= 0; s--) {
+      const anims = this._segments[s].animations;
+      for (let a = anims.length - 1; a >= 0; a--) {
+        anims[a].reset();
       }
     }
 
@@ -125,6 +134,20 @@ export class MasterTimeline extends Timeline {
     }
 
     return this;
+  }
+
+  /**
+   * MasterTimeline.seek() above performs the complete undo itself —
+   * every animation, unwound LIFO — before delegating to the base
+   * seek, so the base class's backward-seek pass must not run a
+   * second, partial undo afterwards: re-resetting only the future
+   * animations would reinstall their begin states over the start
+   * state the full undo just produced (and over the state an earlier
+   * segment's re-begin is about to read when the seek lands inside
+   * that segment).
+   */
+  protected override _resetAnimationsAfter(_time: number): void {
+    // No-op: seek() already reset every animation.
   }
 
   /**

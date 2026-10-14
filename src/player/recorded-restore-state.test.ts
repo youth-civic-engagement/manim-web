@@ -40,6 +40,7 @@ import { NumberPlane } from '../mobjects/graphing/NumberPlane';
 import { Line } from '../mobjects/geometry/Line';
 import { BLUE, ORANGE } from '../constants/colors';
 import { Write } from '../animation/creation/Create';
+import { Timeline } from '../animation/Timeline';
 import { buildEarcutFillGeometry } from '../core/VMobjectGeometry';
 
 function createPlayer(): { player: Player; container: HTMLElement } {
@@ -415,5 +416,152 @@ describe('recorded restore -- parked-state topology (Block G round 3)', () => {
       );
       expect(rawOverride(leaf)).toEqual(rawOverride(freshLeaves[i]));
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Block G round 4: a recorded CHAIN of Transforms on one mobject must
+// reconstruct every state exactly -- in particular the parked state
+// before the FIRST morph. Two coupled defects, one per layer:
+//
+// (alpha) RecordingScene.play() called anim.begin() at record time
+// without running the earlier animations. Transform.begin() captures
+// the Animation snapshot first, then its strategy aligns the LIVE
+// mobject into the morph's aligned start state (resampled points,
+// reordered subpaths, the source's styles). The next segment's
+// begin() therefore snapshot a tree its predecessor's begin() had
+// already mutated: T2's "begin state" was T1's aligned start state,
+// not T1's end state (probe: the changed leaf at [13,58] over 71
+// points where the target render has [58] over 58; the unchanged
+// e2 with its subpaths swapped).
+//
+// (beta) The seek undo cascades (MasterTimeline.seek's reset-all and
+// Timeline.seek's backward pass) reset animations in schedule order.
+// reset() installs the animation's OWN begin state, so the last
+// reset in the cascade decides any state no re-application covers:
+// seeking to the pre-T1 parked time left T2's begin state installed
+// (with true snapshots: the intermediate formula B, not A).
+// End and middle states were exact only because re-application
+// re-runs the earlier morphs to completion and overwrites the
+// bad restore; a single morph was immune because its own reset
+// runs last in its trivial cascade and its snapshot is pristine.
+//
+// Fix: RecordingScene records without beginning animations (begin --
+// and with it the snapshot -- happens at the first playback/seek
+// update, against the state the animation truly starts from), and
+// reset cascades unwind in reverse schedule order (LIFO), with
+// MasterTimeline performing the complete undo itself.
+// ---------------------------------------------------------------------------
+
+const CHAIN_THIRD = ['\\{', '\\mathbf{v}_1', ', ', '\\mathbf{e}_2', ', ', '\\mathbf{t}', '\\}'];
+
+async function buildChainThird(): Promise<MathTex> {
+  const third = new MathTex({ latex: CHAIN_THIRD });
+  await third.waitForRender();
+  third.setColorByTex('\\mathbf{v}_1', ORANGE);
+  third.setColorByTex('\\mathbf{e}_2', BLUE);
+  third.shift([0, 0.8, 0]);
+  return third;
+}
+
+describe('recorded restore -- chained Transforms (Block G round 4)', () => {
+  let player: Player;
+  let container: HTMLElement;
+  afterEach(() => {
+    player?.dispose();
+    container?.remove();
+  });
+
+  // Write(1.0) -> wait(0.6) -> Transform A->B (1.2) -> wait(0.6)
+  //   -> Transform B->C (1.2) -> wait(0.6).
+  // Parked (pre-T1) t=1.3; mid (post-T1) t=3.1; inside T1 t=2.2.
+  async function recordChainScene(): Promise<{ src: MathTex; t1Start: number }> {
+    ({ player, container } = createPlayer());
+    const { before, after } = await buildGlyphPair();
+    const third = await buildChainThird();
+    let t1Start = 0;
+    await player.sequence(async (scene) => {
+      await scene.play(new Write(before, { duration: 1.0 }));
+      await scene.wait(0.6);
+      await scene.play(new Transform(before, after, { duration: 1.2 }));
+      await scene.wait(0.6);
+      await scene.play(new Transform(before, third, { duration: 1.2 }));
+      await scene.wait(0.6);
+    });
+    t1Start = player.timeline.getSegments()[2].startTime;
+    return { src: before, t1Start };
+  }
+
+  it('seek(parked) after a two-Transform chain returns the authored source in full', async () => {
+    const { before: freshA } = await buildGlyphPair();
+    const authoredA = fullLeafSig(freshA as unknown as VMobject);
+    const { src } = await recordChainScene();
+
+    playToEnd(player);
+    player.timeline.seek(1.3);
+    expect(fullLeafSig(src as unknown as VMobject)).toEqual(authoredA);
+
+    // Same after a full pass to the end and back.
+    player.timeline.seek(player.timeline.getDuration());
+    player.timeline.seek(1.3);
+    expect(fullLeafSig(src as unknown as VMobject)).toEqual(authoredA);
+  });
+
+  it('seek(mid) after the chain returns the first target in full (pin)', async () => {
+    const { after: freshB } = await buildGlyphPair();
+    const authoredB = fullLeafSig(freshB as unknown as VMobject);
+    const { src } = await recordChainScene();
+    playToEnd(player);
+    player.timeline.seek(3.1);
+    expect(fullLeafSig(src as unknown as VMobject)).toEqual(authoredB);
+  });
+
+  it('seek(end) after the chain returns the second target in full (pin)', async () => {
+    const freshC = await buildChainThird();
+    const authoredC = fullLeafSig(freshC as unknown as VMobject);
+    const { src } = await recordChainScene();
+    playToEnd(player);
+    expect(fullLeafSig(src as unknown as VMobject)).toEqual(authoredC);
+    player.timeline.seek(player.timeline.getDuration());
+    expect(fullLeafSig(src as unknown as VMobject)).toEqual(authoredC);
+  });
+
+  it('scrubbing into the first morph of a chain interpolates from the authored source (pin)', async () => {
+    const { src, t1Start } = await recordChainScene();
+    // Bare reference: the same morph driven by hand from a fresh
+    // authored source, updated to the same in-segment time.
+    const { before: bareSrc, after: bareTgt } = await buildGlyphPair();
+    const bare = new Transform(bareSrc, bareTgt, { duration: 1.2 });
+    bare.startTime = t1Start;
+    bare.update(0, t1Start + 0.6);
+
+    playToEnd(player);
+    player.timeline.seek(t1Start + 0.6);
+    expect(fullLeafSig(src as unknown as VMobject)).toEqual(
+      fullLeafSig(bareSrc as unknown as VMobject),
+    );
+  });
+
+  it('a plain Timeline unwinds a chain LIFO: backward seek to parked returns the source', async () => {
+    const { before: freshA } = await buildGlyphPair();
+    const authoredA = fullLeafSig(freshA as unknown as VMobject);
+    const { before: src, after: tgtB } = await buildGlyphPair();
+    const tgtC = await buildChainThird();
+    const tl = new Timeline();
+    tl.add(new Write(src, { duration: 1.0 }), 0);
+    tl.add(new Transform(src, tgtB, { duration: 1.2 }), 1.6);
+    tl.add(new Transform(src, tgtC, { duration: 1.2 }), 3.4);
+    tl.play();
+    let guard = 0;
+    while (tl.getCurrentTime() < tl.getDuration() - 1e-9 && guard++ < 100000) {
+      tl.update(1 / 60);
+    }
+    tl.seek(3.1);
+    const { after: freshB } = await buildGlyphPair();
+    expect(fullLeafSig(src as unknown as VMobject)).toEqual(
+      fullLeafSig(freshB as unknown as VMobject),
+    );
+    tl.seek(1.3);
+    expect(fullLeafSig(src as unknown as VMobject)).toEqual(authoredA);
   });
 });
