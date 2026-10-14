@@ -30,20 +30,25 @@ export interface AnimationScene {
 }
 
 /**
- * Capture the VMobject child list of every node in `root`'s subtree,
- * keyed by node. Animation.begin() records this alongside the point
- * snapshot so reset() knows exactly which children existed when the
- * animation began: anything else present at reset time was fabricated
- * during the animation (morph alignment padding) and is removed, and
- * the recorded children are restored pairwise against the snapshot.
+ * Capture the child list of every node in `root`'s subtree, keyed by
+ * node. Animation.begin() records this alongside the state snapshot
+ * so reset() knows exactly which children existed when the animation
+ * began: anything else present at reset time was fabricated during
+ * the animation (morph alignment padding) and is removed, and the
+ * recorded children are restored pairwise against the snapshot.
  * The record lives on the ANIMATION, not the mobject — each animation
  * prunes only its own additions, so two morphs of the same mobject
  * cannot corrupt each other's bookkeeping.
+ *
+ * The walk covers ALL children, not just VMobjects: geometry can
+ * live under plain container nodes (a NumberPlane's grid lines sit
+ * under a plain Group), and a restore that only descends through
+ * VMobject children silently leaves such subtrees unrestored.
  */
-function captureChildIdentities(root: VMobject): Map<VMobject, VMobject[]> {
-  const map = new Map<VMobject, VMobject[]>();
-  const walk = (node: VMobject): void => {
-    const kids = node.children.filter((c): c is VMobject => c instanceof VMobject);
+function captureChildIdentities(root: Mobject): Map<Mobject, Mobject[]> {
+  const map = new Map<Mobject, Mobject[]>();
+  const walk = (node: Mobject): void => {
+    const kids = [...node.children];
     map.set(node, kids);
     for (const kid of kids) walk(kid);
   };
@@ -52,43 +57,76 @@ function captureChildIdentities(root: VMobject): Map<VMobject, VMobject[]> {
 }
 
 /**
- * Restore `live`'s points from its pre-animation snapshot `saved`,
- * structure-aware. A flat `live.setPoints(saved.getLocalPoints())` only
- * works when the animation left the mobject's point counts untouched:
- * a VGroup partitions a flat array across its children by their CURRENT
- * counts, and morph animations (Transform/FadeTransform on a group)
- * legitimately change those counts during begin() — resampling leaves
- * to the aligned counts and padding the child list with fabricated
- * duplicates. The flat restore then throws "VGroup.setPoints: expected
- * <aligned total>, got <original total>".
+ * Restore `live`'s subtree from its pre-animation snapshot `saved`,
+ * structure-aware. A flat `live.setPoints(saved.getLocalPoints())`
+ * only works when the animation left the mobject's point counts
+ * untouched: a VGroup partitions a flat array across its children
+ * by their CURRENT counts, and morph animations (Transform/
+ * FadeTransform on a group) legitimately change those counts
+ * during begin() — resampling leaves to the aligned counts and
+ * padding the child list with fabricated duplicates. The flat
+ * restore then throws "VGroup.setPoints: expected <aligned total>,
+ * got <original total>".
  *
- * Restore per node instead, using the begin() child records: leaves
- * (nodes that own points) take the snapshot's points directly;
- * containers first drop every child their begin() did not record —
- * exactly the fabricated padding, wherever it was inserted — then pair
- * the recorded children with the snapshot's children by index (a
- * snapshot copy preserves child order) and recurse. A recorded child
- * already missing at restore time was itself padding an EARLIER
- * animation added, which that animation's reset (resets run in segment
- * order) has already pruned: skip it — playback re-begins the earlier
- * animation and rebuilds it if needed. If the snapshot's child count
- * disagrees with the record, the two describe different trees and
- * there is no sound restore: fail loudly instead of installing copies.
+ * Restore per node instead, using the begin() child records:
+ * every node first takes back its own transform and style from
+ * the paired snapshot node (morphs rewrite leaf positions and
+ * per-part colors/fills during interpolate()/finish(); restoring
+ * only the root's state and the points left a seek back to a
+ * parked state showing the morph's leaf colors). Leaves (nodes
+ * that own points) then take the snapshot's points directly;
+ * containers drop every child their begin() did not record —
+ * exactly the fabricated padding, wherever it was inserted — then
+ * pair the recorded children with the snapshot's children by
+ * index (a snapshot copy preserves child order) and recurse. The
+ * pairing runs over ALL children, so subtrees under plain
+ * container nodes (a NumberPlane's grid lines under a Group) are
+ * restored too, not just VMobject chains. A recorded child already
+ * missing at restore time was itself padding an EARLIER animation
+ * added, which that animation's reset (resets run in segment
+ * order) has already pruned: skip it — playback re-begins the
+ * earlier animation and rebuilds it if needed. If the snapshot's
+ * child count disagrees with the record, the two describe
+ * different trees and there is no sound restore: fail loudly
+ * instead of installing copies.
  */
-function restorePointsFromSnapshot(
-  live: VMobject,
-  saved: VMobject,
-  beginChildren: Map<VMobject, VMobject[]> | null,
+function restoreSubtreeFromSnapshot(
+  live: Mobject,
+  saved: Mobject,
+  beginChildren: Map<Mobject, Mobject[]> | null,
 ): void {
-  if (saved.hasOwnPoints() || live.hasOwnPoints()) {
-    const pts = saved.getLocalPoints();
-    if (pts.length > 0) {
-      live.setPoints(pts);
-    }
-    return;
+  live.position.copy(saved.position);
+  live.rotation.copy(saved.rotation);
+  live.scaleVector.copy(saved.scaleVector);
+  live.color = saved.color;
+  live.opacity = saved.opacity;
+  live.strokeWidth = saved.strokeWidth;
+  live.fillOpacity = saved.fillOpacity;
+  if (saved.fillColor !== undefined) {
+    live.fillColor = saved.fillColor;
   }
 
-  const savedChildren = saved.children.filter((c): c is VMobject => c instanceof VMobject);
+  if (live instanceof VMobject && saved instanceof VMobject) {
+    if (saved.hasOwnPoints() || live.hasOwnPoints()) {
+      const pts = saved.getLocalPoints();
+      if (pts.length > 0) {
+        live.setPoints(pts);
+      }
+      // The points' subpath topology is part of the point state. A
+      // morph strategy's finish() leaves the TARGET's partition in the
+      // transform override on the source's leaves, where it describes
+      // the target's points -- not the ones just restored. Put back the
+      // override the node carried at begin() (for an authored mobject,
+      // none) alongside its points, or a glyph-changing morph's parked
+      // state renders the source's own points under the target's
+      // partition: where the sums disagree the effective lengths come
+      // out undefined and the glyph fills as a single ring.
+      live.setTransformSubpathLengths(saved.getTransformSubpathLengths());
+      return;
+    }
+  }
+
+  const savedChildren = [...saved.children];
   const expected = beginChildren?.get(live);
   if (!expected) {
     throw new Error(
@@ -102,7 +140,7 @@ function restorePointsFromSnapshot(
     );
   }
 
-  for (const child of live.children.filter((c): c is VMobject => c instanceof VMobject)) {
+  for (const child of [...live.children]) {
     if (!expected.includes(child)) {
       live.remove(child);
     }
@@ -111,9 +149,10 @@ function restorePointsFromSnapshot(
   for (let i = 0; i < expected.length; i++) {
     const child = expected[i];
     if (!live.children.includes(child)) continue;
-    restorePointsFromSnapshot(child, savedChildren[i], beginChildren);
+    restoreSubtreeFromSnapshot(child, savedChildren[i], beginChildren);
   }
 }
+
 export abstract class Animation<M extends Mobject = Mobject> {
   /** The mobject being animated */
   readonly mobject: M;
@@ -147,11 +186,11 @@ export abstract class Animation<M extends Mobject = Mobject> {
   private _preAnimationState: Mobject | null = null;
 
   /**
-   * The mobject's VMobject child lists at begin() time, keyed by node
-   * (see captureChildIdentities). reset()'s point restore uses them to
-   * remove exactly the children this animation added.
+   * The mobject's child lists at begin() time, keyed by node
+   * (see captureChildIdentities). reset()'s subtree restore uses them
+   * to remove exactly the children this animation added.
    */
-  private _preAnimationChildren: Map<VMobject, VMobject[]> | null = null;
+  private _preAnimationChildren: Map<Mobject, Mobject[]> | null = null;
 
   constructor(mobject: M, options: AnimationOptions = {}) {
     // Validate options via typia to generate runtime assertions.
@@ -193,7 +232,7 @@ export abstract class Animation<M extends Mobject = Mobject> {
           this._preAnimationState = this._captureMinimalState();
         }
       }
-      if (this.mobject instanceof VMobject && this._preAnimationState instanceof VMobject) {
+      if (this._preAnimationState instanceof Mobject) {
         this._preAnimationChildren = captureChildIdentities(this.mobject);
       }
     }
@@ -276,7 +315,22 @@ export abstract class Animation<M extends Mobject = Mobject> {
     }
 
     const elapsed = currentTime - this._startTime;
-    const rawAlpha = this.duration > 0 ? Math.min(1, Math.max(0, elapsed / this.duration)) : 1;
+    // Segment start/end times are accumulated floats: a 1.0s segment
+    // followed by a 0.3s wait puts the next segment's start at
+    // 1.2999999999999998, so at that segment's end `elapsed` lands a
+    // hair below `duration` (0.9999999999999998 < 1) and rawAlpha
+    // stalls at 1 - epsilon -- finish() never runs. finish() is where
+    // several animations install their exact end state (Transform
+    // above all: its interpolate() only ever produces the aligned /
+    // resampled morph arrays), so the terminal frame -- in playback
+    // and on seek -- was left as interpolate(1 - epsilon) instead of
+    // the target's own state. Snap the final sliver of elapsed time
+    // to the full duration; 1e-9s is far above the float error
+    // (~1e-13 at these magnitudes) and far below any frame time.
+    const snappedElapsed =
+      this.duration > 0 && elapsed > this.duration - 1e-9 ? this.duration : elapsed;
+    const rawAlpha =
+      this.duration > 0 ? Math.min(1, Math.max(0, snappedElapsed / this.duration)) : 1;
     const alpha = this.rateFunc(rawAlpha);
     this.interpolate(alpha);
 
@@ -310,12 +364,13 @@ export abstract class Animation<M extends Mobject = Mobject> {
       this.mobject.strokeWidth = saved.strokeWidth;
       this.mobject.fillOpacity = saved.fillOpacity;
 
-      // Restore VMobject points if applicable. Structure-aware: morph
+      // Restore the subtree's points, child transforms, and styles
+      // if a begin() record exists. Structure-aware: morph
       // animations may have padded/resampled a container's children
       // during begin(), so a flat setPoints of the snapshot's combined
       // points would partition against the wrong child counts.
-      if (this.mobject instanceof VMobject && saved instanceof VMobject) {
-        restorePointsFromSnapshot(this.mobject, saved, this._preAnimationChildren);
+      if (saved instanceof Mobject && this._preAnimationChildren) {
+        restoreSubtreeFromSnapshot(this.mobject, saved, this._preAnimationChildren);
       }
 
       this.mobject._markDirty();
