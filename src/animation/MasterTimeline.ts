@@ -135,6 +135,20 @@ export class MasterTimeline extends Timeline {
   }
 
   /**
+   * MasterTimeline.seek() above performs the complete undo itself —
+   * every animation, unwound LIFO — before delegating to the base
+   * seek, so the base class's backward-seek pass must not run a
+   * second, partial undo afterwards: re-resetting only the future
+   * animations would reinstall their begin states over the start
+   * state the full undo just produced (and over the state an earlier
+   * segment's re-begin is about to read when the seek lands inside
+   * that segment).
+   */
+  protected override _resetAnimationsAfter(_time: number): void {
+    // No-op: seek() already reset every animation.
+  }
+
+  /**
    * Override update to restore opacity for mobjects whose introducing
    * segment starts during this tick. seek() hides future mobjects by
    * setting opacity=0; this restores them exactly when playback crosses
