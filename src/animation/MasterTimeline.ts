@@ -14,6 +14,7 @@
 
 import { Animation } from './Animation';
 import { Timeline } from './Timeline';
+import { childAnimationsOf, flattenAnimations } from './flattenAnimations';
 import { logger } from '../utils/logger';
 
 export interface Segment {
@@ -112,9 +113,13 @@ export class MasterTimeline extends Timeline {
     // This must run AFTER super.seek() because Timeline.seek() calls
     // reset() again on future animations (for backward seeks), which
     // would restore their opacity and undo our hiding.
+    // Exempt mobjects added directly via scene.add() (createdAtBeginning):
+    // they are on stage from t=0, so playback never hides them — seek
+    // must not either. (update()'s re-hide loop has always honored this
+    // flag; this loop originally did not.)
     for (const [mobject, segIndex] of this._mobjectFirstSegment) {
       const seg = this._segments[segIndex];
-      if (seg && time < seg.startTime) {
+      if (seg && time < seg.startTime && !mobject.createdAtBeginning) {
         mobject.opacity = 0;
       }
     }
@@ -186,11 +191,23 @@ export class MasterTimeline extends Timeline {
     this._segments.push(segment);
 
     // Track which segment first introduces each mobject and save its
-    // original opacity before any seek() hides it.
+    // original opacity before any seek() hides it. The walk flattens
+    // grouped animations (shared helper — see flattenAnimations.ts):
+    // a mobject whose first animation is nested in a LaggedStart or a
+    // ChangeSpeed is introduced by THIS segment, not by a later segment
+    // where it appears as a top-level animation (e.g. as a FadeOut
+    // target). Without the flattening, seek() set such a mobject's
+    // opacity to 0 for the whole span it was actually being animated
+    // in, rendering blank frames for grouped scenes. Container
+    // animations themselves are skipped: their mobject is a dummy
+    // placeholder that animates nothing.
     for (const anim of animations) {
-      if (!this._mobjectFirstSegment.has(anim.mobject)) {
-        this._mobjectFirstSegment.set(anim.mobject, segmentIndex);
-        this._savedMobjectOpacities.set(anim.mobject, anim.mobject.opacity);
+      for (const flat of flattenAnimations(anim)) {
+        if (childAnimationsOf(flat) !== null) continue;
+        if (!this._mobjectFirstSegment.has(flat.mobject)) {
+          this._mobjectFirstSegment.set(flat.mobject, segmentIndex);
+          this._savedMobjectOpacities.set(flat.mobject, flat.mobject.opacity);
+        }
       }
     }
 
