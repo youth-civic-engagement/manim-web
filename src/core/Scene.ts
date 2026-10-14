@@ -639,8 +639,10 @@ export class Scene {
   }
 
   /**
-   * Recursively collect all animations from animation groups — the
-   * shared walk in flattenAnimations.ts.
+   * Recursively collect every animation from animation groups — the
+   * shared walk in flattenAnimations.ts (also unwraps ChangeSpeed), so
+   * live playback, RecordingScene, and MasterTimeline can never
+   * disagree about what a play() contains.
    */
   private _collectAllAnimations(animations: Animation[]): Animation[] {
     const result: Animation[] = [];

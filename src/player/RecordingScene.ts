@@ -103,7 +103,9 @@ export class RecordingScene {
 
   /**
    * Every animation a play() contains, containers first then their
-   * children depth-first — the shared walk in flattenAnimations.ts.
+   * children depth-first — the shared walk in flattenAnimations.ts, so
+   * scene membership here can never disagree with MasterTimeline's
+   * visibility tracking about what a play() contains.
    */
   private _collectAll(animations: Animation[]): Animation[] {
     const result: Animation[] = [];

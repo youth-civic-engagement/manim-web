@@ -1,16 +1,38 @@
 /**
- * The shared walk for "what a play() contains" when animations are
- * grouped: a group schedules only itself, but its children are the
- * animations that actually run.
+ * The ONE definition of "what a play() contains" for the Player's
+ * recording path.
  *
- * Scene._collectAllAnimations and RecordingScene._collectAll used to
- * keep verbatim copies of this recursion; both now call this one
- * helper, so the live scene and the recording path can never disagree
- * about the contents of a play().
+ * Grouped animations schedule only the container on the timeline, but
+ * their children are the ones that actually animate mobjects. Every
+ * consumer that tracks mobjects per animation — MasterTimeline's
+ * first-appearance/visibility maps, RecordingScene's scene membership —
+ * must see through containers, and must see through ALL of them the
+ * same way. (F2's root cause was two subsystems holding different
+ * views of this; a third hand-rolled walk — AnimationGroup-only — then
+ * missed ChangeSpeed entirely, so this walk lives here, shared.)
  */
 
 import { Animation } from './Animation';
 import { AnimationGroup } from './AnimationGroup';
+import { ChangeSpeed } from './speed/index';
+
+/**
+ * Child animations of a container animation, or null when `anim` is a
+ * leaf animation that animates its own mobject directly.
+ *
+ * Containers: AnimationGroup (and its subclasses LaggedStart and
+ * Succession) exposes `.animations`; ChangeSpeed wraps a single
+ * `.animation` and delegates begin/interpolate/finish/reset to it.
+ */
+export function childAnimationsOf(anim: Animation): Animation[] | null {
+  if (anim instanceof AnimationGroup) {
+    return anim.animations;
+  }
+  if (anim instanceof ChangeSpeed) {
+    return [anim.animation];
+  }
+  return null;
+}
 
 /**
  * Flatten an animation tree into every animation it contains, itself
@@ -18,8 +40,9 @@ import { AnimationGroup } from './AnimationGroup';
  */
 export function flattenAnimations(anim: Animation): Animation[] {
   const out: Animation[] = [anim];
-  if (anim instanceof AnimationGroup) {
-    for (const child of anim.animations) {
+  const children = childAnimationsOf(anim);
+  if (children) {
+    for (const child of children) {
       out.push(...flattenAnimations(child));
     }
   }
