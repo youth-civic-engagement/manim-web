@@ -502,6 +502,16 @@ export class VMobject extends VMobjectRendering {
   }
 
   /**
+   * Get the transform-time subpath lengths override, if one is set.
+   * Symmetric with getSubpathLengths() for the base metadata; the
+   * snapshot/restore machinery reads this to put back the exact
+   * override a node carried at capture time.
+   */
+  getTransformSubpathLengths(): number[] | undefined {
+    return this._transformSubpathLengths ? [...this._transformSubpathLengths] : undefined;
+  }
+
+  /**
    * Get effective subpath lengths for rendering.
    * Returns transform override if present, else base/subclass metadata.
    *
@@ -968,6 +978,14 @@ export class VMobject extends VMobjectRendering {
     super._copyBaseAttributesInto(clone, options);
     clone._points3D = this._points3D.map((p) => [...p]);
     clone._visiblePointCount = this._visiblePointCount;
+    // Subpath topology is part of the point state: the lengths partition
+    // the copied points, so a copy that drops them renders compound
+    // paths (glyph counters, holes) as a single filled ring. Both the
+    // intrinsic (base) lengths and any transform-time override must
+    // travel with the points they describe.
+    if (this._baseSubpathLengths !== undefined) {
+      clone._baseSubpathLengths = [...this._baseSubpathLengths];
+    }
     if (this._transformSubpathLengths !== undefined) {
       clone._transformSubpathLengths = [...this._transformSubpathLengths];
     }

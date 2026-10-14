@@ -118,3 +118,22 @@ describe('Transform animation end-to-end (loop / re-run)', () => {
     scene.dispose();
   }, 30000);
 });
+
+describe('copy() preserves subpath-length metadata (Block G round 2)', () => {
+  it('a copy carries the base subpath lengths of its source', () => {
+    const vm = compound(0, 40, 33); // 73 points, base [40, 33]
+    const c = vm.copy();
+    expect(c.getSubpathLengths()).toEqual([40, 33]);
+    expect(c.getEffectiveSubpathLengths()).toEqual([40, 33]);
+  });
+
+  it('a copy carries base lengths even when a transform override is also present', () => {
+    const vm = compound(0, 40, 33);
+    vm.setTransformSubpathLengths([73]);
+    const c = vm.copy();
+    expect(c.getSubpathLengths()).toEqual([40, 33]);
+    expect(c.getEffectiveSubpathLengths()).toEqual([73]);
+    c.setTransformSubpathLengths(undefined);
+    expect(c.getEffectiveSubpathLengths()).toEqual([40, 33]);
+  });
+});
