@@ -4,7 +4,7 @@ import { NullRenderer } from './NullRenderer';
 import { Camera2D, CameraOptions } from './Camera';
 import { Mobject } from './Mobject';
 import { Animation } from '../animation/Animation';
-import { AnimationGroup } from '../animation/AnimationGroup';
+import { flattenAnimations } from '../animation/flattenAnimations';
 import { Timeline } from '../animation/Timeline';
 import { getActiveTheme } from '../utils/ThemeManager';
 import { VMobject } from './VMobject';
@@ -639,15 +639,13 @@ export class Scene {
   }
 
   /**
-   * Recursively collect all leaf animations from animation groups.
+   * Recursively collect all animations from animation groups — the
+   * shared walk in flattenAnimations.ts.
    */
   private _collectAllAnimations(animations: Animation[]): Animation[] {
     const result: Animation[] = [];
     for (const anim of animations) {
-      result.push(anim);
-      if (anim instanceof AnimationGroup) {
-        result.push(...this._collectAllAnimations(anim.animations));
-      }
+      result.push(...flattenAnimations(anim));
     }
     return result;
   }

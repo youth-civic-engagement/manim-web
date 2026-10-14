@@ -8,7 +8,7 @@
 
 import { Scene } from '../core/Scene';
 import { Animation } from '../animation/Animation';
-import { AnimationGroup } from '../animation/AnimationGroup';
+import { flattenAnimations } from '../animation/flattenAnimations';
 import { MasterTimeline, SlideOptions } from '../animation/MasterTimeline';
 
 export class RecordingScene {
@@ -101,13 +101,14 @@ export class RecordingScene {
     this._realScene.batch(callback);
   }
 
+  /**
+   * Every animation a play() contains, containers first then their
+   * children depth-first — the shared walk in flattenAnimations.ts.
+   */
   private _collectAll(animations: Animation[]): Animation[] {
     const result: Animation[] = [];
     for (const anim of animations) {
-      result.push(anim);
-      if (anim instanceof AnimationGroup) {
-        result.push(...this._collectAll(anim.animations));
-      }
+      result.push(...flattenAnimations(anim));
     }
     return result;
   }
