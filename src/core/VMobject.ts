@@ -502,6 +502,16 @@ export class VMobject extends VMobjectRendering {
   }
 
   /**
+   * Get the transform-time subpath lengths override, if one is set.
+   * Symmetric with getSubpathLengths() for the base metadata; the
+   * snapshot/restore machinery reads this to put back the exact
+   * override a node carried at capture time.
+   */
+  getTransformSubpathLengths(): number[] | undefined {
+    return this._transformSubpathLengths ? [...this._transformSubpathLengths] : undefined;
+  }
+
+  /**
    * Get effective subpath lengths for rendering.
    * Returns transform override if present, else base/subclass metadata.
    *
