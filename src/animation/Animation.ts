@@ -29,6 +29,91 @@ export interface AnimationScene {
   remove(...mobjects: Mobject[]): void;
 }
 
+/**
+ * Capture the VMobject child list of every node in `root`'s subtree,
+ * keyed by node. Animation.begin() records this alongside the point
+ * snapshot so reset() knows exactly which children existed when the
+ * animation began: anything else present at reset time was fabricated
+ * during the animation (morph alignment padding) and is removed, and
+ * the recorded children are restored pairwise against the snapshot.
+ * The record lives on the ANIMATION, not the mobject — each animation
+ * prunes only its own additions, so two morphs of the same mobject
+ * cannot corrupt each other's bookkeeping.
+ */
+function captureChildIdentities(root: VMobject): Map<VMobject, VMobject[]> {
+  const map = new Map<VMobject, VMobject[]>();
+  const walk = (node: VMobject): void => {
+    const kids = node.children.filter((c): c is VMobject => c instanceof VMobject);
+    map.set(node, kids);
+    for (const kid of kids) walk(kid);
+  };
+  walk(root);
+  return map;
+}
+
+/**
+ * Restore `live`'s points from its pre-animation snapshot `saved`,
+ * structure-aware. A flat `live.setPoints(saved.getLocalPoints())` only
+ * works when the animation left the mobject's point counts untouched:
+ * a VGroup partitions a flat array across its children by their CURRENT
+ * counts, and morph animations (Transform/FadeTransform on a group)
+ * legitimately change those counts during begin() — resampling leaves
+ * to the aligned counts and padding the child list with fabricated
+ * duplicates. The flat restore then throws "VGroup.setPoints: expected
+ * <aligned total>, got <original total>".
+ *
+ * Restore per node instead, using the begin() child records: leaves
+ * (nodes that own points) take the snapshot's points directly;
+ * containers first drop every child their begin() did not record —
+ * exactly the fabricated padding, wherever it was inserted — then pair
+ * the recorded children with the snapshot's children by index (a
+ * snapshot copy preserves child order) and recurse. A recorded child
+ * already missing at restore time was itself padding an EARLIER
+ * animation added, which that animation's reset (resets run in segment
+ * order) has already pruned: skip it — playback re-begins the earlier
+ * animation and rebuilds it if needed. If the snapshot's child count
+ * disagrees with the record, the two describe different trees and
+ * there is no sound restore: fail loudly instead of installing copies.
+ */
+function restorePointsFromSnapshot(
+  live: VMobject,
+  saved: VMobject,
+  beginChildren: Map<VMobject, VMobject[]> | null,
+): void {
+  if (saved.hasOwnPoints() || live.hasOwnPoints()) {
+    const pts = saved.getLocalPoints();
+    if (pts.length > 0) {
+      live.setPoints(pts);
+    }
+    return;
+  }
+
+  const savedChildren = saved.children.filter((c): c is VMobject => c instanceof VMobject);
+  const expected = beginChildren?.get(live);
+  if (!expected) {
+    throw new Error(
+      'Animation reset: no begin() child record for a container mobject; cannot restore points safely.',
+    );
+  }
+  if (savedChildren.length !== expected.length) {
+    throw new Error(
+      `Animation reset: snapshot has ${savedChildren.length} children where begin() recorded ` +
+        `${expected.length}; cannot restore points safely.`,
+    );
+  }
+
+  for (const child of live.children.filter((c): c is VMobject => c instanceof VMobject)) {
+    if (!expected.includes(child)) {
+      live.remove(child);
+    }
+  }
+
+  for (let i = 0; i < expected.length; i++) {
+    const child = expected[i];
+    if (!live.children.includes(child)) continue;
+    restorePointsFromSnapshot(child, savedChildren[i], beginChildren);
+  }
+}
 export abstract class Animation<M extends Mobject = Mobject> {
   /** The mobject being animated */
   readonly mobject: M;
@@ -60,6 +145,13 @@ export abstract class Animation<M extends Mobject = Mobject> {
    * the mobject to its pre-animation visual state for clean re-seeking.
    */
   private _preAnimationState: Mobject | null = null;
+
+  /**
+   * The mobject's VMobject child lists at begin() time, keyed by node
+   * (see captureChildIdentities). reset()'s point restore uses them to
+   * remove exactly the children this animation added.
+   */
+  private _preAnimationChildren: Map<VMobject, VMobject[]> | null = null;
 
   constructor(mobject: M, options: AnimationOptions = {}) {
     // Validate options via typia to generate runtime assertions.
@@ -100,6 +192,9 @@ export abstract class Animation<M extends Mobject = Mobject> {
           );
           this._preAnimationState = this._captureMinimalState();
         }
+      }
+      if (this.mobject instanceof VMobject && this._preAnimationState instanceof VMobject) {
+        this._preAnimationChildren = captureChildIdentities(this.mobject);
       }
     }
     this._hasBegun = true;
@@ -215,12 +310,12 @@ export abstract class Animation<M extends Mobject = Mobject> {
       this.mobject.strokeWidth = saved.strokeWidth;
       this.mobject.fillOpacity = saved.fillOpacity;
 
-      // Restore VMobject points if applicable
+      // Restore VMobject points if applicable. Structure-aware: morph
+      // animations may have padded/resampled a container's children
+      // during begin(), so a flat setPoints of the snapshot's combined
+      // points would partition against the wrong child counts.
       if (this.mobject instanceof VMobject && saved instanceof VMobject) {
-        const pts = saved.getLocalPoints();
-        if (pts && pts.length > 0) {
-          this.mobject.setPoints(pts);
-        }
+        restorePointsFromSnapshot(this.mobject, saved, this._preAnimationChildren);
       }
 
       this.mobject._markDirty();
