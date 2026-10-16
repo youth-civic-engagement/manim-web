@@ -127,7 +127,7 @@ describe('WB grouped animation (lesson idioms)', () => {
     }
   }, 60000);
 
-  it('recorded Transform of one VGroup diagram into another lands children on their targets', async () => {
+  it('recorded Transform of one VGroup diagram into another lands leaves on their targets', async () => {
     ({ player, container } = createPlayer());
     const srcDot = new Circle({ radius: 0.5 });
     srcDot.shift([-2, 0, 0]);
@@ -135,11 +135,17 @@ describe('WB grouped animation (lesson idioms)', () => {
     srcBox.shift([2, 0, 0]);
     const source = new VGroup(srcDot, srcBox);
 
+    // The target diagram GAINS an element (a construction mark) —
+    // child counts differ, which is exactly where recursive child-
+    // list alignment is needed; a same-count morph passes even on
+    // pristine upstream and would not guard the fix.
     const tgtDot = new Circle({ radius: 1 });
     tgtDot.shift([-2, 1, 0]);
     const tgtBall = new Circle({ radius: 0.5 });
     tgtBall.shift([2, -1, 0]);
-    const target = new VGroup(tgtDot, tgtBall);
+    const tgtMark = new Rectangle({ width: 0.6, height: 0.6 });
+    tgtMark.shift([0, 2, 0]);
+    const target = new VGroup(tgtDot, tgtBall, tgtMark);
 
     await player.sequence(async (scene) => {
       await scene.play(new FadeIn(source));
@@ -147,11 +153,17 @@ describe('WB grouped animation (lesson idioms)', () => {
     });
 
     player.timeline.seek(2);
-    const landed = (source.children as VMobject[]).map((c) => c.getCenter());
-    const wanted = (target.children as VMobject[]).map((c) => c.getCenter());
-    for (let i = 0; i < wanted.length; i++) {
-      expect(landed[i][0]).toBeCloseTo(wanted[i][0], 3);
-      expect(landed[i][1]).toBeCloseTo(wanted[i][1], 3);
+    const leafCenters = (root: VMobject): Array<[number, number]> =>
+      root.familyMembersWithPoints().map((m) => {
+        const c = m.getCenter();
+        return [c[0], c[1]] as [number, number];
+      });
+    const landed = leafCenters(source);
+    const wanted = leafCenters(target);
+    expect(landed.length).toBe(wanted.length);
+    for (const [wx, wy] of wanted) {
+      const hit = landed.some(([lx, ly]) => Math.abs(lx - wx) < 0.01 && Math.abs(ly - wy) < 0.01);
+      expect(hit, `a leaf landed at (${wx}, ${wy})`).toBe(true);
     }
     expect(source.opacity).toBeCloseTo(1, 3);
   }, 60000);
