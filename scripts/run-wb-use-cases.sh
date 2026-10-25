@@ -16,15 +16,11 @@
 # node_modules: if missing, this script symlinks the suite home's
 # node_modules when available, else runs `npm ci`. No interactive
 # steps; exit code is vitest's exit code. Expected results:
-#   WB stack (wb/stack-0.39.3)  -> all pass
-#   PR chain (pr/restack-0.39.3)-> only the theme-seed tests fail
-#                                  (MathTex/Text/Axes light defaults —
-#                                  the seeds are deployed extras)
-#   pristine upstream v0.39.3   -> the recorded-path, MathTex, and
-#                                  grouped-seek tests fail (the bugs
-#                                  the chain patches), the theme-seed
-#                                  tests fail (extras), slides +
-#                                  upstream theme pins pass
+#   WB stack                    -> all pass (2 tests)
+#   pristine upstream v0.40.1   -> both tests FAIL (they pin the
+#                                  group-alignment fix). Suite pruned
+#                                  2026-10-25: cases that pass on
+#                                  pristine upstream were removed.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
