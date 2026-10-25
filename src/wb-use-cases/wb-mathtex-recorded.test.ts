@@ -1,31 +1,23 @@
 // @vitest-environment happy-dom
 /**
- * WB use case — MathTex through the Player-recorded path.
+ * WB use case -- MathTex through the Player-recorded path.
  *
- * Whiteboard lessons are formulas first: the tutor copies a rendered
- * formula and keeps deriving from the copy, transforms one equation
- * into the next (glyph counts change), uses \mathbb for number sets,
- * and scales a line before re-using it. Each behavior below broke on
- * pristine upstream in the RECORDED path specifically (upstream's
- * spring fixes covered direct playback only):
+ * Transform one equation into the next where the glyph count changes:
+ * the recorded variant of the group-alignment defect (threw
+ * "VGroup.setPoints: expected 158 points, got 316"). -> chain patch
+ * "group alignment"
  *
- *   - copy of a rendered MathTex -> chain patch "MathTex.copy"
- *     (duplicated glyphs / lost parts; original symptom of #251)
- *   - transform changing glyph count -> chain patch "group
- *     alignment" (recorded variant of #280; threw
- *     "VGroup.setPoints: expected 158 points, got 316")
- *   - \mathbb -> chain patch "mathbb dynamic font"
- *   - pre-applied scale through a copy -> chain patches "MathTex.copy"
- *     + scale handling (recorded variant of #324)
+ * (The copy-of-rendered-MathTex, \\mathbb, and pre-applied-scale cases
+ * that also lived here pass on pristine upstream since the MathTex.copy
+ * and mathbb fixes merged; their tests were pruned in the 2026-10-25
+ * cleanup.)
  *
- * On pristine v0.39.3 every test in this file is expected to FAIL;
- * on the grafted stack all pass.
+ * On pristine upstream this test FAILS; on the grafted stack it passes.
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import { Player } from '../player/Player';
 import { MathTex } from '../mobjects/text/MathTex';
 import { VMobject } from '../core/VMobject';
-import { Create, Write, getLine2TotalLength } from '../animation/creation/Create';
 import { Transform } from '../animation/transform/Transform';
 
 function createPlayer(): { player: Player; container: HTMLElement } {
@@ -49,22 +41,6 @@ function totalPoints(root: VMobject): number {
   return n;
 }
 
-function revealFrac(m: VMobject): number {
-  let reveal = 0;
-  let total = 0;
-  for (const member of m.familyMembersWithPoints()) {
-    for (const line of member.getOwnStrokeLines()) {
-      const len = getLine2TotalLength(line);
-      total += len;
-      if (line.visible) {
-        const mat = line.material as unknown as { dashed: boolean; dashSize: number };
-        reveal += mat.dashed ? Math.min(mat.dashSize, len) : len;
-      }
-    }
-  }
-  return total > 0 ? reveal / total : 0;
-}
-
 describe('WB MathTex through the recorded path', () => {
   let player: Player;
   let container: HTMLElement;
@@ -73,20 +49,6 @@ describe('WB MathTex through the recorded path', () => {
     player?.dispose();
     container?.remove();
   });
-
-  it('recorded Create on a copy of a rendered MathTex keeps every glyph exactly once', async () => {
-    ({ player, container } = createPlayer());
-    const original = await createRenderedTex('x^2 + y^2 = r^2');
-    const copy = original.copy() as MathTex;
-    await player.sequence(async (scene) => {
-      await scene.play(new Create(copy));
-    });
-
-    player.timeline.seek(1);
-    expect(copy.children.length).toBe(original.children.length);
-    expect(totalPoints(copy)).toBe(totalPoints(original));
-    expect(revealFrac(copy)).toBeCloseTo(1, 3);
-  }, 60000);
 
   it('recorded Transform between formulas with different glyph counts ends exact', async () => {
     ({ player, container } = createPlayer());
@@ -103,35 +65,5 @@ describe('WB MathTex through the recorded path', () => {
     const tc = to.getCenter();
     expect(fc[0]).toBeCloseTo(tc[0], 3);
     expect(fc[1]).toBeCloseTo(tc[1], 3);
-  }, 60000);
-
-  it('\\mathbb renders through the recorded path (dynamic font)', async () => {
-    ({ player, container } = createPlayer());
-    const tex = await createRenderedTex('\\mathbb{R}');
-    // The double-struck glyph exists only if the NewCM dynamic font
-    // range loaded; a missing font leaves an empty glyph shell.
-    expect(tex.children.length).toBeGreaterThan(0);
-    expect(totalPoints(tex)).toBeGreaterThan(0);
-
-    await player.sequence(async (scene) => {
-      await scene.play(new Write(tex));
-    });
-    player.timeline.seek(1);
-    expect(revealFrac(tex)).toBeCloseTo(1, 3);
-  }, 60000);
-
-  it('a pre-applied scale survives copying and recorded Create', async () => {
-    ({ player, container } = createPlayer());
-    const original = await createRenderedTex('e^{i\\pi} + 1 = 0');
-    original.scale(0.5);
-    const scaledWidth = original.getWidth();
-    const copy = original.copy() as MathTex;
-    await player.sequence(async (scene) => {
-      await scene.play(new Create(copy));
-    });
-
-    player.timeline.seek(1);
-    expect(copy.getWidth()).toBeCloseTo(scaledWidth, 2);
-    expect(totalPoints(copy)).toBe(totalPoints(original));
   }, 60000);
 });
