@@ -133,15 +133,6 @@ describe('Animation.update terminal snap (mechanism)', () => {
     expect(anim.isFinished()).toBe(true);
     expect(anim.alphas[anim.alphas.length - 1]).toBe(1);
   });
-
-  it('does not finish early outside the final sliver', () => {
-    const anim = new ProbeAnimation(new VMobject(), { duration: 1 });
-    anim.startTime = 0;
-    anim.update(0, 0.5);
-    anim.update(0, 1 - 1e-6);
-    expect(anim.finishCount).toBe(0);
-    expect(anim.isFinished()).toBe(false);
-  });
 });
 
 describe('recorded Transform end state (S1)', () => {

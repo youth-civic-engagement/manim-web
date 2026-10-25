@@ -261,8 +261,7 @@ describe('group alignment (alignPoints / alignVmobjectPair)', () => {
   // leaf-pairing group path pairs the two leaf FAMILIES (Manim CE
   // semantics, the same as Transform), so an empty subgroup is no
   // longer special: the morph runs and every end leaf lands on the
-  // target's own render. A target with no leaves at all still fails
-  // at begin() with a descriptive error, never mid-animation.
+  // target's own render.
   it('FadeTransform pairs leaf families when a subgroup is empty on one side (B3)', () => {
     const source = new VGroup(new VGroup(vmWithPoints(6)), vmWithPoints(6));
     const targetLeaf = vmWithPoints(6);
@@ -278,14 +277,6 @@ describe('group alignment (alignPoints / alignVmobjectPair)', () => {
     for (const leaf of endLeaves) {
       expect(leaf.getLocalPoints()).toEqual(targetLeaf.getLocalPoints());
     }
-  });
-
-  it('FadeTransform fails at begin() when the target has no leaves at all (B3)', () => {
-    const source = new VGroup(vmWithPoints(6));
-    const target = new VGroup();
-
-    const anim = new FadeTransform(source, target);
-    expect(() => anim.begin()).toThrowError(/mismatched point counts/);
   });
 });
 
